@@ -499,7 +499,7 @@ def generate_synthetic_transactions(target_rows=5000000, start_date='2023-01-01'
     """Generate large-scale synthetic financial data with varying transaction counts per user."""
     
     # Estimate number of users needed (adjust multiplier based on transaction patterns)
-    estimated_users = target_rows // 2000  # Adjusted for more transactions per user
+    estimated_users = target_rows // 1400  # Adjusted for more transactions per user
     print(f"Estimated number of users needed: {estimated_users}")
     
     # Generate user profiles
@@ -630,7 +630,7 @@ def analyze_dataset(file_path):
 
 if __name__ == "__main__":
     output_dir = os.getcwd()
-    output_file = os.path.join(output_dir, 'synthetic_financial_data_5M.csv')
+    output_file = os.path.join(output_dir, '/Users/deonnaowens/Downloads/synthetic_financial_data_test.csv')
     
     print("Starting large-scale data generation process...")
     print(f"Output will be saved to: {output_file}")
@@ -638,7 +638,7 @@ if __name__ == "__main__":
     start_time = datetime.now()
     
     total_rows = generate_synthetic_transactions(
-        target_rows=1_500_000,
+        target_rows=14_500,
         start_date='2023-01-01',
         end_date='2024-12-31',
         batch_size=100000,
