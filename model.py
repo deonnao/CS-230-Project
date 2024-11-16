@@ -1,10 +1,15 @@
 import numpy as np
 import pandas as pd
+import tensorflow as tf
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.layers import Bidirectional
+from tensorflow.keras.layers import Conv1D, BatchNormalization
 from sklearn.model_selection import train_test_split
+import tensorflow.keras.backend as K
 import os
+import matplotlib.pyplot as plt
 
 """
 Monthly Spending Prediction Model
@@ -36,8 +41,10 @@ Dependencies:
 
 """
 
+
 class SpendingPredictionModel:
-    def __init__(self, seq_length=3):
+    
+    def __init__(self, seq_length=50):
         """
         Initializes the model with a sequence length for the LSTM.
 
@@ -48,6 +55,7 @@ class SpendingPredictionModel:
         self.scaler = MinMaxScaler()
         self.amount_scaler = MinMaxScaler()
         self.model = None
+        
 
     def load_and_preprocess_data(self, data):
         """
@@ -62,30 +70,62 @@ class SpendingPredictionModel:
         # Convert date to datetime and create monthly periods
         data['date'] = pd.to_datetime(data['date']) # Converts date column to datatime object for sequential processing
         data = data.sort_values(by=['user_id', 'date']) # Sorts user id and date in chronological order for sequential processing
+
+        data['day_of_week'] = data['date'].dt.dayofweek
+        data['day_of_month'] = data['date'].dt.day
+        data['month'] = data['date'].dt.month
+        data['year'] = data['date'].dt.year
+
+        self.amount_scaler.fit(data[['amount']])
+        data['amount'] = self.amount_scaler.transform(data[['amount']])
+        
+        # Normalize continuous features at the transaction level
+        numerical_columns = ['income', 'age', 'family_size']
+        data[numerical_columns] = self.scaler.fit_transform(data[numerical_columns])
+
+        
+        category_encoded = pd.get_dummies(data, columns=['category'], dtype='float32')
+        # print('CATEGORY DATA: ', category_encoded)
+        # exit()
+
+        data = pd.concat([data, category_encoded], axis=1)
+        data = data.loc[:, ~data.columns.duplicated()]
+        
+        # Update feature_columns to include the new one-hot encoded columns
+        category_columns = [col for col in category_encoded.columns if 'category_' in col]
+        # feature_columns = ['amount', 'income', 'age', 'family_size'] 
+
+        
+        # print('DATA COLUMNS: ', data.columns)
+        # exit()
+
+        # Define the feature columns you want to use in the model
+        feature_columns = ['amount', 'income', 'age', 'family_size', 'day_of_week', 'day_of_month', 'month', 'year'] + category_columns
+        print('FEATURE COLUMNS SIZE: ', len(feature_columns))
+
         
         # Summarizes spending for each month for each user
-        monthly_data = data.groupby(['user_id', 'year', 'month']).agg({
-            'amount': 'sum',           # Sum total spending for each category within the month
-            'income': 'first',          # Keep income constant for the user
-            'family_size': 'first',      # Keep family size constant for the user
-            'age': 'first'               # Keep age constant for the user
-        }).reset_index()
-        
-        print("Min and Max of 'amount' before scaling:", monthly_data['amount'].min(), monthly_data['amount'].max())
+        # monthly_data = data.groupby(['user_id', 'year', 'month']).agg({
+        #     'amount': 'sum',
+        #     'income': 'first',
+        #     'family_size': 'first',
+        #     'age': 'first',
+        # }).reset_index()
 
         # Normalize 'amount' separately using amount_scaler
-        monthly_data['amount'] = self.amount_scaler.fit_transform(monthly_data[['amount']])
+        # monthly_data['amount'] = self.amount_scaler.fit_transform(monthly_data[['amount']])
 
         # Normalize the other continuous features using the main scaler
-        monthly_data[['income', 'family_size', 'age']] = self.scaler.fit_transform(
-            monthly_data[['income', 'family_size', 'age']]
-        )
+        # monthly_data[['income', 'family_size', 'age']] = \
+        #     self.scaler.fit_transform(monthly_data[['income', 'family_size', 'age']])
         
         # Create sequences and labels
-        X, y = self._create_sequences(monthly_data)
+        # X, y = self._create_sequences(monthly_data)
+
+        X, y = self._create_sequences(data, feature_columns)
         return X, y
 
-    def _create_sequences(self, data):
+    def _create_sequences(self, data, feature_columns):
         """
         Creates sequences from the data for LSTM input.
 
@@ -97,32 +137,39 @@ class SpendingPredictionModel:
         """
         sequences = []
         targets = []
+    
         # We create sequences of 3 months length
         for user_id in data['user_id'].unique():
             user_data = data[data['user_id'] == user_id]
-            # This loop will allow us to stop when we can no longer create full sequences (3 months + 1 month for target)
+            # This loop will allow us to stop when we can no longer create full sequences
             for i in range(len(user_data) - self.seq_length):
-                seq = user_data[['amount', 'income', 'family_size', 'age']].iloc[i:i + self.seq_length].values
+                seq = user_data[feature_columns].iloc[i:i + self.seq_length].values
                 target = user_data['amount'].iloc[i + self.seq_length]
                 sequences.append(seq)
                 targets.append(target)
         return np.array(sequences), np.array(targets)
+    
 
     def build_model(self):
         """
         Builds and compiles the LSTM model.
 
         """
+        num_features = 17
         self.model = Sequential()
-        self.model.add(LSTM(64, input_shape=(self.seq_length, 4), return_sequences=True))
-        self.model.add(Dropout(0.2))
-        self.model.add(LSTM(32, return_sequences=False)) 
-        self.model.add(Dropout(0.2))
-        self.model.add(Dense(1))  # Output layer for predicting spending amount
+
+        self.model.add(Conv1D(filters=64, kernel_size=2, activation='relu', input_shape=(self.seq_length, num_features)))
+        self.model.add(BatchNormalization())
+
+        self.model.add(LSTM(128, return_sequences=True))
+        self.model.add(Dropout(0.1))
+        self.model.add(LSTM(64)) 
+        # self.model.add(Dropout(0.1))  
+        self.model.add(Dense(1))  
 
         self.model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
 
-    def train_model(self, X_train, y_train, X_val, y_val, epochs=20, batch_size=32):
+    def train_model(self, X_train, y_train, X_val, y_val, epochs=20, batch_size=128):
         """
         Trains the LSTM model.
 
@@ -177,12 +224,12 @@ class SpendingPredictionModel:
         return predictions
 
 if __name__ == "__main__":
-    # Load data
+   
     data_dir = os.getcwd()
     data_path = os.path.join(data_dir, 'data/synthetic_financial_data_test.csv')
     data = pd.read_csv(data_path)  
 
-    model = SpendingPredictionModel(seq_length=3)
+    model = SpendingPredictionModel(seq_length=50)
 
     X, y = model.load_and_preprocess_data(data)
 
@@ -191,11 +238,39 @@ if __name__ == "__main__":
 
     model.build_model()
     print(model.model.summary())
-    history = model.train_model(X_train, y_train, X_val, y_val, epochs=20, batch_size=32)
+
+    history = model.train_model(X_train, y_train, X_val, y_val, epochs=20, batch_size=128)
+
     loss, mae = model.evaluate_model(X_test, y_test)
 
-    predictions = model.predict(X_test[:5])
-    print("Predictions:", predictions)
+    predictions = model.predict(X_test)
+ 
     predictions_denormalized = model.amount_scaler.inverse_transform(predictions)
-    print("Predictions in original scale:", predictions_denormalized)
+
+    # Denormalize actual test targets
+    y_test_denormalized = model.amount_scaler.inverse_transform(y_test.reshape(-1, 1))
+
+    # Calculate the absolute difference between predicted and actual values
+    difference = np.abs(predictions_denormalized - y_test_denormalized)
+
+    # Set the tolerance level (e.g., 10% of the actual value)
+    tolerance = 0.1
+
+    # Check if each prediction is within the tolerance range of the actual value
+    within_tolerance = difference <= tolerance * np.abs(y_test_denormalized)
+
+    # Calculate accuracy as the percentage of predictions within the tolerance range
+    accuracy = np.mean(within_tolerance) * 100
+
+    print(f"Accuracy within ±10% tolerance: {accuracy:.2f}%")
     
+    # Plot predicted vs actual spending
+    plt.figure(figsize=(10, 6))
+    plt.plot(predictions_denormalized, label="Predicted Spending", linestyle="--", marker="o", color="blue")
+    plt.plot(y_test_denormalized, label="Actual Spending", linestyle="-", marker="x", color="orange")
+    plt.title("Predicted vs Actual Spending Over Time")
+    plt.xlabel("Time Steps")
+    plt.ylabel("Spending Amount ($)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
