@@ -10,6 +10,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import cross_val_score
 from xgboost import plot_importance
+from sklearn.metrics import mean_absolute_error
+from sklearn.preprocessing import OneHotEncoder
 import tensorflow.keras.backend as K
 import os
 import matplotlib.pyplot as plt
@@ -44,6 +46,30 @@ Dependencies:
 
 """
 
+
+def plot_predictions_vs_actuals(y_test, predictions, category):
+    """
+    Plots actual vs predicted values for a specific category.
+    
+    Parameters:
+    - y_test: Actual values (denormalized).
+    - predictions: Predicted values (denormalized).
+    - category: The category being plotted.
+    - scaler: The scaler used for normalization (to denormalize y_test and predictions).
+    """
+   
+    # Create a line plot for actual vs predicted values
+    plt.figure(figsize=(10, 6))
+    plt.plot(y_test, label='Actual Spending', color='blue', linestyle='--', marker='o')
+    plt.plot(predictions, label='Predicted Spending', color='orange', linestyle='-', marker='x')
+    plt.title(f'Predicted vs Actual Spending for {category.capitalize()}')
+    plt.xlabel('Time Steps (Test Data)')
+    plt.ylabel('Spending Amount ($)')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(f"{category}_spending_plot.png", dpi=300, bbox_inches="tight")
+
+
 def mean_absolute_percentage_error(y_true, y_pred):
     return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
 
@@ -58,11 +84,10 @@ class SpendingPredictionModel:
         """
         self.seq_length = seq_length
         self.scaler = MinMaxScaler()
-        self.amount_scaler = MinMaxScaler()
         self.model = None
         
 
-    def load_and_preprocess_data(self, data):
+    def load_and_preprocess_data(self, data, category):
         """
         Loads and preprocesses the data for LSTM input.
 
@@ -73,48 +98,21 @@ class SpendingPredictionModel:
         - X, y: Processed input features and labels
         """
 
-        # Summarizes spending for each month for each user
-        monthly_data = data.groupby(['user_id', 'year', 'month']).agg({
-            'amount': 'sum',           # Sum total spending for each category within the month
-            'income': 'first',          # Keep income constant for the user
-            'family_size': 'first',      # Keep family size constant for the user
-            'age': 'first'               # Keep age constant for the user
-        }).reset_index()
+        # Filter data for the given category
+        category_data = data[data['category'] == category].sort_values(['user_id', 'date'])
 
-        # Normalize 'amount' separately using amount_scaler
-        monthly_data['amount'] = self.amount_scaler.fit_transform(monthly_data[['amount']])
+        # Normalize the spending amounts
+        category_data['amount'] = self.scaler.fit_transform(category_data[['amount']])
 
-        # Normalize the other continuous features using the main scaler
-        monthly_data[['income', 'family_size', 'age']] = self.scaler.fit_transform(
-            monthly_data[['income', 'family_size', 'age']]
-        )
-        
-        # Create sequences and labels
-        X, y = self._create_sequences(monthly_data)
-        
-        return X, y
+        # Generate sequences and targets
+        sequences, targets = [], []
+        for user_id in category_data['user_id'].unique():
+            user_data = category_data[category_data['user_id'] == user_id]
+            spending = user_data['amount'].values
+            for i in range(len(spending) - self.seq_length):
+                sequences.append(spending[i:i + self.seq_length])
+                targets.append(spending[i + self.seq_length])
 
-    def _create_sequences(self, data):
-        """
-        Creates sequences from the data for LSTM input.
-
-        Parameters:
-        - data: Preprocessed DataFrame containing aggregated monthly user data
-
-        Returns:
-        - sequences(X), targets(y): Arrays of input sequences and corresponding labels
-        """
-        sequences = []
-        targets = []
-        # We create sequences of 3 months length
-        for user_id in data['user_id'].unique():
-            user_data = data[data['user_id'] == user_id]
-            # This loop will allow us to stop when we can no longer create full sequences (3 months + 1 month for target)
-            for i in range(len(user_data) - self.seq_length):
-                seq = user_data[['amount', 'income', 'family_size', 'age']].iloc[i:i + self.seq_length].values
-                target = user_data['amount'].iloc[i + self.seq_length]
-                sequences.append(seq)
-                targets.append(target)
         return np.array(sequences), np.array(targets)
     
 
@@ -123,21 +121,26 @@ class SpendingPredictionModel:
         Builds and compiles the LSTM model.
 
         """
-        num_features = 4
+        
         self.model = Sequential()
-
-        self.model.add(Conv1D(filters=64, kernel_size=2, activation='relu', input_shape=(self.seq_length, num_features)))
+        self.model.add(
+            Conv1D(
+                filters=64,
+                kernel_size=2,
+                activation="relu",
+                input_shape=(self.seq_length, 1),
+            )
+        )
         self.model.add(BatchNormalization())
-
         self.model.add(LSTM(128, return_sequences=True))
         self.model.add(Dropout(0.1))
-        self.model.add(LSTM(64)) 
-        self.model.add(Dropout(0.1))  
-        self.model.add(Dense(1))  
+        self.model.add(LSTM(64))
+        self.model.add(Dropout(0.1))
+        self.model.add(Dense(1, activation="relu"))
+        self.model.compile(optimizer="adam", loss="mean_squared_error", metrics=["mae"])
 
-        self.model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
 
-    def train_model(self, X_train, y_train, X_val, y_val, epochs=20, batch_size=32):
+    def train_model(self, X_train, y_train, X_val, y_val, epochs=200, batch_size=32):
         """
         Trains the LSTM model.
 
@@ -169,9 +172,7 @@ class SpendingPredictionModel:
         """
         if self.model is None:
             raise ValueError("Model not built. Call build_model() before evaluating.")
-        
         loss, mae = self.model.evaluate(X_test, y_test)
-        print(f"Test Loss: {loss}, Test MAE: {mae}")
         return loss, mae
 
     def predict(self, X):
@@ -186,61 +187,63 @@ class SpendingPredictionModel:
         """
         if self.model is None:
             raise ValueError("Model not built. Call build_model() before predicting.")
-        
-        predictions = self.model.predict(X)
-
-        return predictions
+        return self.model.predict(X)
 
 if __name__ == "__main__":
    
     data_dir = os.getcwd()
-    data_path = os.path.join(data_dir, 'data/synthetic_financial_data_1.5M.csv')
-    data = pd.read_csv(data_path)  
+    data_path = os.path.join(data_dir, 'data/user0.csv')
+    data = pd.read_csv(data_path)
 
+    # Initialize the model
     model = SpendingPredictionModel(seq_length=11)
+    # Categories to predict
+    categories = data['category'].unique()
 
-    X, y = model.load_and_preprocess_data(data)
+    for category in categories:
+        print(f"Processing category: {category}")
+        
+        # Preprocess data for the specific category
+        X, y = model.load_and_preprocess_data(data, category)
 
-    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
-    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+        # Split data into training, validation, and test sets
+        X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+        X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
 
-    model.build_model()
-    print(model.model.summary())
+        # Build and train the model
+        model.build_model()
+        print(model.model.summary())
 
-    history = model.train_model(X_train, y_train, X_val, y_val, epochs=20, batch_size=32)
+        history = model.train_model(X_train, y_train, X_val, y_val, epochs=200, batch_size=32)
 
-    loss, mae = model.evaluate_model(X_test, y_test)
+        # Evaluate the model
+        loss, mae = model.evaluate_model(X_test, y_test)
+        print(f"Category: {category}, Test Loss: {loss}, Test MAE: {mae}")
 
-    predictions = model.predict(X_test)
- 
-    predictions_denormalized = model.amount_scaler.inverse_transform(predictions)
+        # Make predictions
+        predictions = model.predict(X_test)
 
-    # Denormalize actual test targets
-    y_test_denormalized = model.amount_scaler.inverse_transform(y_test.reshape(-1, 1))
+        # Denormalize predictions and actuals
+        predictions_denormalized = model.scaler.inverse_transform(predictions)
+        y_test_denormalized = model.scaler.inverse_transform(y_test.reshape(-1, 1))
 
-    # Calculate the absolute difference between predicted and actual values
-    difference = np.abs(predictions_denormalized - y_test_denormalized)
+        print(f"Category: {category}, Predictions: {predictions_denormalized[:5].flatten()}")
+        print(f"Category: {category}, Actuals: {y_test_denormalized[:5].flatten()}")
+        
+        print('MAPE: ', mean_absolute_percentage_error(y_test_denormalized, predictions_denormalized))
 
-    # Set the tolerance level (e.g., 10% of the actual value)
-    tolerance = 0.1
+        # Calculate the absolute difference between predicted and actual values
+        difference = np.abs(predictions_denormalized - y_test_denormalized)
 
-    # Check if each prediction is within the tolerance range of the actual value
-    within_tolerance = difference <= tolerance * np.abs(y_test_denormalized)
+        # Set the tolerance level (e.g., 10% of the actual value)
+        tolerance = 0.1
 
-    # Calculate accuracy as the percentage of predictions within the tolerance range
-    accuracy = np.mean(within_tolerance) * 100
+        # Check if each prediction is within the tolerance range of the actual value
+        within_tolerance = difference <= tolerance * np.abs(y_test_denormalized)
 
-    print(f"Accuracy within ±10% tolerance: {accuracy:.2f}%")
+        # Calculate accuracy as the percentage of predictions within the tolerance range
+        accuracy = np.mean(within_tolerance) * 100
 
-    print('MAPE: ', mean_absolute_percentage_error(y_test_denormalized, predictions_denormalized))
+        print(f"Accuracy within ±10% tolerance: {accuracy:.2f}%")
 
-    # Plot predicted vs actual spending
-    plt.figure(figsize=(10, 6))
-    plt.plot(predictions_denormalized, label="Predicted Spending", linestyle="--", marker="x", color="blue")
-    plt.plot(y_test_denormalized, label="Actual Spending", linestyle="-", marker="o", color="orange")
-    plt.title("Predicted vs Actual Spending Over Time")
-    plt.xlabel("Time Steps")
-    plt.ylabel("Spending Amount ($)")
-    plt.legend()
-    plt.grid(True)
-    plt.show()
+        plot_predictions_vs_actuals(y_test_denormalized, predictions_denormalized, category)
